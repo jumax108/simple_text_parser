@@ -7,10 +7,8 @@
 #pragma comment(lib, "lib/dump/dump")
 
 #include "objectFreeList/headers/objectFreeList.h"
-#pragma comment(lib, "lib/objectFreeList/objectFreeList")
 
 #include "linkedList/headers/linkedList.h"
-#pragma comment(lib, "lib/linkedList/LinkedList")
 
 
 class CTextParser{
@@ -20,7 +18,7 @@ public:
 	CTextParser(const char* fileName);
 
 	bool setNameSpace(const char* name);
-	inline void resetNameSpace();
+	void resetNameSpace();
 
 	bool getIntByKey(
 		const char* key, // value를 찾을 key 값

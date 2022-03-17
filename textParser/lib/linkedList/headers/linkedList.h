@@ -4,7 +4,6 @@
 #pragma comment(lib, "lib/dump/dump")
 
 #include "objectFreeList/headers/objectFreeList.h"
-#pragma comment(lib, "lib/objectFreeList/objectFreeList")
 
 template<typename T>
 class CLinkedList {
