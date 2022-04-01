@@ -37,7 +37,7 @@ CTextParser::CTextParser(const char* fileName) :
 	_nowNameSpace = _defaultNameSpace;
 
 	// 현재 선택된 네임스페이스
-	stNameSpace* nowNameSpace = _defaultNameSpace;
+	stNameSpace* nowNameSpace = _nowNameSpace;
 	
  	while (_index < _fileSize) {
 		

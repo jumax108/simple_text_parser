@@ -2,6 +2,8 @@
 # Created by https://www.toptal.com/developers/gitignore/api/windows,c++,visualstudio
 # Edit at https://www.toptal.com/developers/gitignore?templates=windows,c++,visualstudio
 
+*.bmp
+
 ### C++ ###
 # Prerequisites
 *.d
@@ -35,7 +37,6 @@
 *.lai
 *.la
 *.a
-*.lib
 
 # Executables
 *.exe
@@ -432,3 +433,7 @@ FodyWeavers.xsd
 *.tlog
 
 # End of https://www.toptal.com/developers/gitignore/api/windows,c++,visualstudio
+
+
+
+*.dmp
