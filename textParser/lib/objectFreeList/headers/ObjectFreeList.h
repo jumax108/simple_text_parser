@@ -20,9 +20,6 @@
 	#define freeObject(x) _freeObject(x)
 #endif
 
-#define toNode(ptr) ((stAllocNode<T>*)((unsigned __int64)ptr & 0x000007FFFFFFFFFF))
-#define toPtr(cnt, pNode) ((void*)((unsigned __int64)pNode | (cnt << 43)))
-
 template<typename T>
 struct stAllocNode {
 	stAllocNode() {
@@ -33,7 +30,7 @@ struct stAllocNode {
 
 	void init(){
 		
-		_nextPtr = nullptr;
+		_nextNode = nullptr;
 
 		#if defined(OBJECT_FREE_LIST_DEBUG)
 			_allocated = false;
@@ -66,7 +63,7 @@ struct stAllocNode {
 	#endif
 
 	// 할당할 다음 노드
-	void* _nextPtr;
+	stAllocNode<T>* _nextNode;
 
 	#if defined(OBJECT_FREE_LIST_DEBUG)
 		// 소스 파일 이름
@@ -118,16 +115,13 @@ private:
 
 	// 사용 가능한 노드를 리스트의 형태로 저장합니다.
 	// 할당하면 제거합니다.
-	void* _freePtr;
+	stAllocNode<T>* _freeNode;
 
 	// 전체 노드 개수
 	unsigned int _capacity;
 
 	// 현재 할당된 노드 개수
 	unsigned int _usedCnt;
-
-	// 데이터 포인터(stNode->data)에 이 값을 더하면 노드 포인터(stNode)가 된다 !
-	unsigned __int64 _dataPtrToNodePtr;
 
 	// 메모리 정리용
 	// 단순 리스트
@@ -139,16 +133,14 @@ private:
 	// freeList 소멸자에서 메모리 정리용으로 사용합니다.
 	// new한 포인터들
 	stSimpleListNode* _totalAllocList;
-		
-	// 리스트 변경 횟수
-	// ABA 문제를 회피하기 위해 사용합니다.
-	unsigned __int64 _nodeChangeCnt;
 
 	// 할당 시, 생성자 실행 여부를 나타냅니다.
 	bool _runConstructor;
 
 	// 해제 시, 소멸자 실행 여부를 나타냅니다.
 	bool _runDestructor;
+
+	SRWLOCK _lock;
 
 	#if defined(OBJECT_FREE_LIST_DEBUG)
 		CLog log;
@@ -161,7 +153,7 @@ CObjectFreeList<T>::CObjectFreeList(bool runConstructor, bool runDestructor, int
 	
 	_heap = HeapCreate(0, 0, 0);
 
-	_freePtr = nullptr;
+	_freeNode = nullptr;
 	_totalAllocList = nullptr;
 	
 	_capacity = size;
@@ -170,17 +162,10 @@ CObjectFreeList<T>::CObjectFreeList(bool runConstructor, bool runDestructor, int
 	_runConstructor = runConstructor;
 	_runDestructor = runDestructor;
 	
-	_nodeChangeCnt = 0;
-
 	#if defined(OBJECT_FREE_LIST_DEBUG)
 		log.setDirectory(L"objectFreeList_Log");
 		log.setPrintGroup(LOG_GROUP::LOG_DEBUG);
-	#endif`
-
-	// 실제 노드와 노드의 data와의 거리 계산
-	stAllocNode<T>* tempNode = (stAllocNode<T>*)HeapAlloc(_heap, 0, sizeof(stAllocNode<T>));
-	_dataPtrToNodePtr = (unsigned __int64)tempNode - (unsigned __int64)&tempNode->_data;
-	HeapFree(_heap, 0, tempNode);
+	#endif
 
 	if (size == 0) {
 		return;
@@ -198,8 +183,8 @@ CObjectFreeList<T>::CObjectFreeList(bool runConstructor, bool runDestructor, int
 			newNode->init();
 		}
 
-		newNode->_nextPtr = _freePtr;
-		_freePtr = newNode;
+		newNode->_nextNode = _freeNode;
+		_freeNode = newNode;
 
 		{
 			// 전체 alloc list에 추가
@@ -281,76 +266,66 @@ T* CObjectFreeList<T>::_allocObject(
 	#endif
 ) {
 	
-	InterlockedIncrement(&_usedCnt);
-	
-	stAllocNode<T>* allocNode;
+	T* data;
 
-	void* freePtr;
-	void* nextPtr;
+	AcquireSRWLockExclusive(&_lock); {
+					
+		stAllocNode<T>* allocNode;
 
-	unsigned __int64 nodeChangeCnt;
-	
-	_nodeChangeCnt += 1;
+		do {
 
-	do {
-		// 원본 데이터 복사
-		freePtr = _freePtr;
-		nodeChangeCnt = _nodeChangeCnt;
-
-		allocNode = toNode(freePtr);
-
-		if (allocNode == nullptr) {
-
-			// 추가 할당
-			allocNode = (stAllocNode<T>*)HeapAlloc(_heap, 0, sizeof(stAllocNode<T>));
-			if(_runConstructor == false) {
-				new (allocNode) stAllocNode<T>;
-			} else {
-				allocNode->init();
-			}
-		
-			// 전체 alloc list에 추가
-			// 소멸자에서 일괄적으로 메모리 해제하기 위함
-			stSimpleListNode* totalAllocNode = (stSimpleListNode*)HeapAlloc(_heap, 0, sizeof(stSimpleListNode));
-			stSimpleListNode* totalAllocList;
-
-			do {
-
-				totalAllocList = _totalAllocList;
+			// 노드가 없으면 새로 할당
+			if(_freeNode == nullptr){
+			
+				allocNode = (stAllocNode<T>*)HeapAlloc(_heap, 0, sizeof(stAllocNode<T>));
+				stSimpleListNode* totalAllocNode = (stSimpleListNode*)HeapAlloc(_heap, 0, sizeof(stSimpleListNode));
 
 				totalAllocNode->_ptr = allocNode;
-				totalAllocNode->_next = totalAllocList;
+				totalAllocNode->_next = _totalAllocList;
+				_totalAllocList = totalAllocNode;
 
-			} while( InterlockedCompareExchange64((LONG64*)&_totalAllocList, (LONG64)totalAllocNode, (LONG64)totalAllocList) != (LONG64)totalAllocList );
+				_capacity += 1;
 
-			_capacity += 1;
+				if (_runConstructor == false) {
+					new (allocNode) stAllocNode<T>;
+				}
+				else {
+					allocNode->init();
+				}
 
-			break;
+				break;
+			
+			}
 
+			// 노드가 있으면 free node로 지급
+			allocNode = _freeNode;
+			_freeNode = _freeNode->_nextNode;
+
+		} while (false);
+
+		_usedCnt += 1;
+	
+		// 소멸자 호출 여부 초기화
+		allocNode->_callDestructor = false;
+
+		// debug 기능
+		#if defined(OBJECT_FREE_LIST_DEBUG)
+			// 노드를 사용중으로 체크함
+			allocNode->_allocated = true;
+
+			// 할당 요청한 소스파일과 소스라인을 기록함
+			allocNode->_allocSourceFileName = fileName;
+			allocNode->_allocLine = line;
+		#endif
+	
+		data = &allocNode->_data;
+
+		// 생성자 실행
+		if(_runConstructor == true){
+			new (data) T();
 		}
-
-		nextPtr = allocNode->_nextPtr;
-
-	} while(InterlockedCompareExchange64((LONG64*)&_freePtr, (LONG64)nextPtr, (LONG64)freePtr) != (LONG64)freePtr);
 	
-	// 소멸자 호출 여부 초기화
-	allocNode->_callDestructor = false;
-
-	#if defined(OBJECT_FREE_LIST_DEBUG)
-		// 노드를 사용중으로 체크함
-		allocNode->_allocated = true;
-
-		// 할당 요청한 소스파일과 소스라인을 기록함
-		allocNode->_allocSourceFileName = fileName;
-		allocNode->_allocLine = line;
-	#endif
-	
-	T* data = &allocNode->_data;
-
-	// 생성자 실행
-	if(_runConstructor == true){
-		new (data) T();
-	}
+	} ReleaseSRWLockExclusive(&_lock);
 
 	return data;
 }
@@ -362,55 +337,45 @@ int CObjectFreeList<T>::_freeObject(T* data
 	#endif
 ) {
 
-	stAllocNode<T>* usedNode = (stAllocNode<T>*)(((char*)data) + _dataPtrToNodePtr);
-	
-	#if defined(OBJECT_FREE_LIST_DEBUG)
-		// 중복 free 체크
-		if(usedNode->_allocated == false){
-			CDump::crash();
+	AcquireSRWLockExclusive(&_lock); {
+
+		stAllocNode<T>* usedNode = (stAllocNode<T>*)(((char*)data) + objectFreeList_stack_lock::DATA_TO_NODE_PTR);
+		
+		// overflow 체크 등 debug 기능
+		#if defined(OBJECT_FREE_LIST_DEBUG)
+			// 중복 free 체크
+			if(usedNode->_allocated == false){
+				CDump::crash();
+			}
+
+			// 오버플로우 체크
+			if((unsigned __int64)usedNode->_overFlowCheck != 0xF9F9F9F9F9F9F9F9){
+				CDump::crash();
+			}
+
+			// 언더플로우 체크
+			if((unsigned __int64)usedNode->_underFlowCheck != 0xF9F9F9F9F9F9F9F9){
+				CDump::crash();
+			}
+
+			// 노드의 사용중 플래그를 내림
+			usedNode->_allocated = false;
+		#endif
+
+		// 소멸자 실행
+		if(_runDestructor == true){
+			data->~T();
+			usedNode->_callDestructor = true;
 		}
 
-		// 오버플로우 체크
-		if((unsigned __int64)usedNode->_overFlowCheck != 0xF9F9F9F9F9F9F9F9){
-			CDump::crash();
-		}
+		// 내부 스택에 삽입
+		usedNode->_nextNode = _freeNode;
+		_freeNode = usedNode;
 
-		// 언더플로우 체크
-		if((unsigned __int64)usedNode->_underFlowCheck != 0xF9F9F9F9F9F9F9F9){
-			CDump::crash();
-		}
+		// 사용 카운터 감소
+		_usedCnt -= 1;
 
-		// 노드의 사용중 플래그를 내림
-		usedNode->_allocated = false;
-	#endif
-
-	// 소멸자 실행
-	if(_runDestructor == true){
-		data->~T();
-		usedNode->_callDestructor = true;
-	}
-
-	void* freePtr;
-	void* nextPtr;
-
-	unsigned __int64 nodeChangeCnt = 0;
-
-	_nodeChangeCnt += 1;
-
-	do {
-
-		// 원본 데이터 복사
-		freePtr = _freePtr;
-		nodeChangeCnt = _nodeChangeCnt;
-			
-		// 사용했던 노드의 next를 현재 top으로 변경
-		usedNode->_nextPtr = freePtr;
-
-		nextPtr = toPtr(nodeChangeCnt, usedNode);
-
-	} while(InterlockedCompareExchange64((LONG64*)&_freePtr, (LONG64)nextPtr, (LONG64)freePtr) != (LONG64)freePtr);
-	
-	InterlockedDecrement(&_usedCnt);
+	} ReleaseSRWLockExclusive(&_lock);
 
 	return 0;
 
